@@ -168,6 +168,11 @@ async function showLatest() {
   }
 }
 
+function alertBox(msg) {
+  let el = $('cfgerr');
+  if (!el) { el = document.createElement('div'); el.id = 'cfgerr'; el.className = 'err'; el.style.marginTop = '10px'; $('save').parentNode.before(el); }
+  el.textContent = msg;
+}
 function openSettings() {
   $('api').value = cfg.api; $('tok').value = cfg.tok; $('maxacc').value = cfg.maxacc;
   $('settings').style.display = 'flex';
@@ -175,7 +180,10 @@ function openSettings() {
 $('cfg').onclick = openSettings;
 $('cancel').onclick = () => $('settings').style.display = 'none';
 $('save').onclick = () => {
-  cfg = { api: $('api').value.trim(), tok: $('tok').value.trim(), maxacc: +$('maxacc').value || 0 };
+  const api = $('api').value.trim(), tok = $('tok').value.trim();
+  if (!/^https:\/\/script\.google\.com\/.+\/exec$/.test(api)) { alertBox('請貼上完整的 Apps Script 網址（https://script.google.com/…/exec）'); return; }
+  if (!tok) { alertBox('請填 Token'); return; }
+  cfg = { api, tok, maxacc: +$('maxacc').value || 0 };
   store.set('api', cfg.api); store.set('tok', cfg.tok); store.set('maxacc', String(cfg.maxacc));
   $('settings').style.display = 'none';
   loadDay($('date').value);
