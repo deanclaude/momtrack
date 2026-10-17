@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>媽媽追蹤器</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2330; --muted:#6b7280; --accent:#2563eb; --line:#e5e7eb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111418; --card:#1b2027; --text:#e8eaed; --muted:#9aa3ad; --accent:#60a5fa; --line:#2c333c; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font-family: -apple-system, "Noto Sans TC", "PingFang TC", sans-serif; }
+  body { display:flex; flex-direction:column; }
+  header { padding:10px 12px; background:var(--card); border-bottom:1px solid var(--line);
+    display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  header h1 { font-size:17px; margin:0 auto 0 0; }
+  button, input, select { font:inherit; font-size:15px; padding:6px 10px; border-radius:8px;
+    border:1px solid var(--line); background:var(--bg); color:var(--text); }
+  button { cursor:pointer; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  #bar { padding:8px 12px; font-size:14px; color:var(--muted); background:var(--card);
+    border-bottom:1px solid var(--line); display:flex; flex-wrap:wrap; gap:4px 14px; }
+  #bar b { color:var(--text); }
+  #map { flex:1; min-height:300px; }
+  #settings { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none;
+    align-items:center; justify-content:center; padding:16px; z-index:1000; }
+  #settings .box { background:var(--card); padding:18px; border-radius:12px; width:100%; max-width:420px; }
+  #settings label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  #settings input { width:100%; }
+  .row { display:flex; gap:6px; align-items:center; }
+  .err { color:#dc2626; }
+</style>
+</head>
+<body>
+<header>
+  <h1>👩 媽媽追蹤器</h1>
+  <div class="row">
+    <button id="prev" aria-label="前一天">◀</button>
+    <input type="date" id="date">
+    <button id="next" aria-label="後一天">▶</button>
+  </div>
+  <div class="row">
+    <button id="now" class="primary">最新位置</button>
+    <button id="cfg" aria-label="設定">⚙︎</button>
+  </div>
+</header>
+<div id="bar">載入中…</div>
+<div id="map"></div>
+
+<div id="settings">
+  <div class="box">
+    <b>連線設定</b>
+    <label>Apps Script 網址（…/exec）</label>
+    <input id="api" placeholder="https://script.google.com/macros/s/.../exec">
+    <label>Token</label>
+    <input id="tok" type="password">
+    <label>忽略誤差大於（公尺）的點</label>
+    <input id="maxacc" type="number" min="0" step="50">
+    <div class="row" style="margin-top:14px; justify-content:flex-end">
+      <button id="cancel">取消</button>
+      <button id="save" class="primary">儲存</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const TZ = 'Asia/Taipei';
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('momtrack.' + k); return v === null ? d : v; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem('momtrack.' + k, v); } catch (e) {} }
+};
+let cfg = { api: store.get('api', ''), tok: store.get('tok', ''), maxacc: +store.get('maxacc', '200') };
+
+const $ = id => document.getElementById(id);
+const todayStr = () => new Intl.DateTimeFormat('sv-SE', { timeZone: TZ }).format(new Date());
+const shiftDay = (s, n) => { const d = new Date(s + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+const fmtTime = t => new Date(t).toLocaleTimeString('zh-TW', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false });
+const fmtFull = t => new Date(t).toLocaleString('zh-TW', { timeZone: TZ, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+function ago(t) {
+  const m = Math.round((Date.now() - t) / 60000);
+  if (m < 1) return '剛剛';
+  if (m < 60) return m + ' 分鐘前';
+  const h = Math.floor(m / 60);
+  return h < 48 ? h + ' 小時前' : Math.floor(h / 24) + ' 天前';
+}
+function dist(a, b) {
+  const R = 6371000, r = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * r, dLon = (b.lon - a.lon) * r;
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+
+const map = L.map('map').setView([25.04, 121.56], 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '© OpenStreetMap'
+}).addTo(map);
+const layer = L.layerGroup().addTo(map);
+
+async function api(params) {
+  const q = new URLSearchParams({ ...params, token: cfg.tok });
+  const res = await fetch(cfg.api + '?' + q.toString());
+  const j = await res.json();
+  if (!j.ok) throw new Error(j.error || '讀取失敗');
+  return j;
+}
+
+async function loadLatestBar() {
+  try {
+    const { point } = await api({ action: 'latest' });
+    if (!point) return '<span>尚無任何回報</span>';
+    const batt = point.batt !== '' && point.batt != null ? `　🔋 <b>${point.batt}%</b>` : '';
+    return `<span>最後回報 <b>${fmtFull(point.t)}</b>（${ago(point.t)}）${batt}</span>`;
+  } catch (e) { return ''; }
+}
+
+async function loadDay(date) {
+  if (!cfg.api || !cfg.tok) { openSettings(); $('bar').textContent = '請先完成連線設定'; return; }
+  $('bar').textContent = '載入中…';
+  layer.clearLayers();
+  try {
+    const [day, latestHtml] = await Promise.all([api({ action: 'read', date }), loadLatestBar()]);
+    const all = day.points;
+    const pts = all.filter(p => !(cfg.maxacc > 0 && +p.acc > cfg.maxacc));
+    let total = 0;
+    for (let i = 1; i < pts.length; i++) total += dist(pts[i - 1], pts[i]);
+
+    if (pts.length) {
+      const ll = pts.map(p => [p.lat, p.lon]);
+      L.polyline(ll, { color: '#2563eb', weight: 4, opacity: .8 }).addTo(layer);
+      pts.forEach((p, i) => {
+        const isFirst = i === 0, isLast = i === pts.length - 1;
+        const m = L.circleMarker([p.lat, p.lon], {
+          radius: isLast ? 9 : isFirst ? 7 : 4,
+          color: isLast ? '#dc2626' : isFirst ? '#16a34a' : '#2563eb',
+          fillOpacity: isLast || isFirst ? .9 : .6, weight: 2
+        }).addTo(layer);
+        const acc = p.acc !== '' && p.acc != null ? `<br>誤差 ±${Math.round(p.acc)} m` : '';
+        const batt = p.batt !== '' && p.batt != null ? `<br>電量 ${p.batt}%` : '';
+        m.bindPopup(`<b>${fmtTime(p.t)}</b>${isFirst ? '（起點）' : isLast ? '（終點）' : ''}${acc}${batt}`);
+      });
+      const last = pts[pts.length - 1];
+      if (last.acc) L.circle([last.lat, last.lon], { radius: +last.acc, color: '#dc2626', weight: 1, fillOpacity: .08 }).addTo(layer);
+      map.fitBounds(L.latLngBounds(ll).pad(0.2), { maxZoom: 17 });
+    }
+    const skipped = all.length - pts.length;
+    $('bar').innerHTML =
+      `<span>${date}：<b>${pts.length}</b> 點${skipped ? `（略過 ${skipped} 個不準點）` : ''}</span>` +
+      `<span>移動約 <b>${(total / 1000).toFixed(1)}</b> km</span>` + latestHtml;
+  } catch (e) {
+    $('bar').innerHTML = `<span class="err">錯誤：${e.message}</span>`;
+  }
+}
+
+async function showLatest() {
+  try {
+    const { point } = await api({ action: 'latest' });
+    if (!point) return;
+    const d = new Intl.DateTimeFormat('sv-SE', { timeZone: TZ }).format(new Date(point.t));
+    $('date').value = d;
+    await loadDay(d);
+    map.setView([point.lat, point.lon], 16);
+  } catch (e) {
+    $('bar').innerHTML = `<span class="err">錯誤：${e.message}</span>`;
+  }
+}
+
+function openSettings() {
+  $('api').value = cfg.api; $('tok').value = cfg.tok; $('maxacc').value = cfg.maxacc;
+  $('settings').style.display = 'flex';
+}
+$('cfg').onclick = openSettings;
+$('cancel').onclick = () => $('settings').style.display = 'none';
+$('save').onclick = () => {
+  cfg = { api: $('api').value.trim(), tok: $('tok').value.trim(), maxacc: +$('maxacc').value || 0 };
+  store.set('api', cfg.api); store.set('tok', cfg.tok); store.set('maxacc', String(cfg.maxacc));
+  $('settings').style.display = 'none';
+  loadDay($('date').value);
+};
+$('date').onchange = () => loadDay($('date').value);
+$('prev').onclick = () => { $('date').value = shiftDay($('date').value, -1); loadDay($('date').value); };
+$('next').onclick = () => { $('date').value = shiftDay($('date').value, 1); loadDay($('date').value); };
+$('now').onclick = showLatest;
+
+$('date').value = todayStr();
+$('date').max = todayStr();
+loadDay($('date').value);
+
+// 看今天時，每 5 分鐘自動更新
+setInterval(() => { if ($('date').value === todayStr() && $('settings').style.display !== 'flex') loadDay($('date').value); }, 5 * 60 * 1000);
+</script>
+</body>
+</html>
