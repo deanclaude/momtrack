@@ -32,6 +32,9 @@
   #settings input { width:100%; }
   .row { display:flex; gap:6px; align-items:center; }
   .err { color:#dc2626; }
+  .src { display:inline-flex; align-items:center; gap:4px; font-size:14px; cursor:pointer; user-select:none; }
+  .src input { width:16px; height:16px; margin:0; padding:0; }
+  .dot { width:12px; height:12px; border-radius:50%; display:inline-block; }
 </style>
 </head>
 <body>
@@ -41,6 +44,10 @@
     <button id="prev" aria-label="前一天">◀</button>
     <input type="date" id="date">
     <button id="next" aria-label="後一天">▶</button>
+  </div>
+  <div class="row">
+    <label class="src"><input type="checkbox" id="show-mitag" checked><span class="dot" style="background:#ea580c"></span>MiTag</label>
+    <label class="src"><input type="checkbox" id="show-phone" checked><span class="dot" style="background:#2563eb"></span>手機</label>
   </div>
   <div class="row">
     <button id="now" class="primary">最新位置</button>
@@ -108,61 +115,80 @@ async function api(params) {
   return j;
 }
 
-async function loadLatestBar() {
-  try {
-    const { point } = await api({ action: 'latest' });
-    if (!point) return '<span>尚無任何回報</span>';
-    const batt = point.batt !== '' && point.batt != null ? `　🔋 <b>${point.batt}%</b>` : '';
-    return `<span>最後回報 <b>${fmtFull(point.t)}</b>（${ago(point.t)}）${batt}</span>`;
-  } catch (e) { return ''; }
+const SRC = {
+  mitag: { label: 'MiTag', color: '#ea580c' },
+  phone: { label: '手機', color: '#2563eb' }
+};
+const shown = k => $('show-' + k).checked;
+let lastDay = null, lastLatest = null;
+
+function latestBarHtml(latest) {
+  if (!latest || !latest.bySource) return '';
+  return Object.keys(SRC).filter(k => latest.bySource[k]).map(k => {
+    const p = latest.bySource[k];
+    const batt = p.batt !== '' && p.batt != null ? ` 🔋${p.batt}%` : '';
+    return `<span><span class="dot" style="background:${SRC[k].color}"></span> ${SRC[k].label} 最後 <b>${fmtFull(p.t)}</b>（${ago(p.t)}）${batt}</span>`;
+  }).join('');
+}
+
+function draw(fit) {
+  layer.clearLayers();
+  if (!lastDay) return;
+  const all = lastDay.points;
+  const bounds = [];
+  const parts = [`<span>${lastDay.date}</span>`];
+  Object.keys(SRC).forEach(k => {
+    const raw = all.filter(p => (p.src || 'mitag') === k);
+    const pts = raw.filter(p => !(cfg.maxacc > 0 && +p.acc > cfg.maxacc));
+    let total = 0;
+    for (let i = 1; i < pts.length; i++) total += dist(pts[i - 1], pts[i]);
+    const skipped = raw.length - pts.length;
+    parts.push(`<span><span class="dot" style="background:${SRC[k].color}"></span> ${SRC[k].label} <b>${pts.length}</b> 點・${(total / 1000).toFixed(1)} km${skipped ? `（略過 ${skipped}）` : ''}</span>`);
+    if (!shown(k) || !pts.length) return;
+    const c = SRC[k].color;
+    const ll = pts.map(p => [p.lat, p.lon]);
+    L.polyline(ll, { color: c, weight: 4, opacity: .8, dashArray: k === 'mitag' ? '8 6' : null }).addTo(layer);
+    pts.forEach((p, i) => {
+      const isFirst = i === 0, isLast = i === pts.length - 1;
+      const m = L.circleMarker([p.lat, p.lon], {
+        radius: isLast ? 9 : isFirst ? 7 : 4, color: c, fillColor: isFirst ? '#fff' : c,
+        fillOpacity: isLast ? .95 : .7, weight: isLast ? 3 : 2
+      }).addTo(layer);
+      const acc = p.acc !== '' && p.acc != null ? `<br>誤差 ±${Math.round(p.acc)} m` : '';
+      const batt = p.batt !== '' && p.batt != null ? `<br>電量 ${p.batt}%` : '';
+      m.bindPopup(`<b>${SRC[k].label} ${fmtTime(p.t)}</b>${isFirst ? '（起點）' : isLast ? '（終點）' : ''}${acc}${batt}`);
+      bounds.push([p.lat, p.lon]);
+    });
+    const last = pts[pts.length - 1];
+    if (last.acc) L.circle([last.lat, last.lon], { radius: +last.acc, color: c, weight: 1, fillOpacity: .08 }).addTo(layer);
+  });
+  if (fit && bounds.length) map.fitBounds(L.latLngBounds(bounds).pad(0.2), { maxZoom: 17 });
+  $('bar').innerHTML = parts.join('') + latestBarHtml(lastLatest);
 }
 
 async function loadDay(date) {
   if (!cfg.api || !cfg.tok) { openSettings(); $('bar').textContent = '請先完成連線設定'; return; }
   $('bar').textContent = '載入中…';
-  layer.clearLayers();
   try {
-    const [day, latestHtml] = await Promise.all([api({ action: 'read', date }), loadLatestBar()]);
-    const all = day.points;
-    const pts = all.filter(p => !(cfg.maxacc > 0 && +p.acc > cfg.maxacc));
-    let total = 0;
-    for (let i = 1; i < pts.length; i++) total += dist(pts[i - 1], pts[i]);
-
-    if (pts.length) {
-      const ll = pts.map(p => [p.lat, p.lon]);
-      L.polyline(ll, { color: '#2563eb', weight: 4, opacity: .8 }).addTo(layer);
-      pts.forEach((p, i) => {
-        const isFirst = i === 0, isLast = i === pts.length - 1;
-        const m = L.circleMarker([p.lat, p.lon], {
-          radius: isLast ? 9 : isFirst ? 7 : 4,
-          color: isLast ? '#dc2626' : isFirst ? '#16a34a' : '#2563eb',
-          fillOpacity: isLast || isFirst ? .9 : .6, weight: 2
-        }).addTo(layer);
-        const acc = p.acc !== '' && p.acc != null ? `<br>誤差 ±${Math.round(p.acc)} m` : '';
-        const batt = p.batt !== '' && p.batt != null ? `<br>電量 ${p.batt}%` : '';
-        m.bindPopup(`<b>${fmtTime(p.t)}</b>${isFirst ? '（起點）' : isLast ? '（終點）' : ''}${acc}${batt}`);
-      });
-      const last = pts[pts.length - 1];
-      if (last.acc) L.circle([last.lat, last.lon], { radius: +last.acc, color: '#dc2626', weight: 1, fillOpacity: .08 }).addTo(layer);
-      map.fitBounds(L.latLngBounds(ll).pad(0.2), { maxZoom: 17 });
-    }
-    const skipped = all.length - pts.length;
-    $('bar').innerHTML =
-      `<span>${date}：<b>${pts.length}</b> 點${skipped ? `（略過 ${skipped} 個不準點）` : ''}</span>` +
-      `<span>移動約 <b>${(total / 1000).toFixed(1)}</b> km</span>` + latestHtml;
+    const [day, latest] = await Promise.all([api({ action: 'read', date }), api({ action: 'latest' }).catch(() => null)]);
+    lastDay = day; lastLatest = latest;
+    draw(true);
   } catch (e) {
+    layer.clearLayers();
     $('bar').innerHTML = `<span class="err">錯誤：${e.message}</span>`;
   }
 }
 
 async function showLatest() {
   try {
-    const { point } = await api({ action: 'latest' });
-    if (!point) return;
-    const d = new Intl.DateTimeFormat('sv-SE', { timeZone: TZ }).format(new Date(point.t));
+    const latest = await api({ action: 'latest' });
+    const pick = ['phone', 'mitag'].filter(shown).map(k => latest.bySource && latest.bySource[k]).filter(Boolean)
+      .sort((a, b) => b.t - a.t)[0] || latest.point;
+    if (!pick) return;
+    const d = new Intl.DateTimeFormat('sv-SE', { timeZone: TZ }).format(new Date(pick.t));
     $('date').value = d;
     await loadDay(d);
-    map.setView([point.lat, point.lon], 16);
+    map.setView([pick.lat, pick.lon], 16);
   } catch (e) {
     $('bar').innerHTML = `<span class="err">錯誤：${e.message}</span>`;
   }
@@ -192,6 +218,11 @@ $('date').onchange = () => loadDay($('date').value);
 $('prev').onclick = () => { $('date').value = shiftDay($('date').value, -1); loadDay($('date').value); };
 $('next').onclick = () => { $('date').value = shiftDay($('date').value, 1); loadDay($('date').value); };
 $('now').onclick = showLatest;
+['mitag', 'phone'].forEach(k => {
+  const el = $('show-' + k);
+  el.checked = store.get('show.' + k, '1') === '1';
+  el.onchange = () => { store.set('show.' + k, el.checked ? '1' : '0'); draw(false); };
+});
 
 $('date').value = todayStr();
 $('date').max = todayStr();
