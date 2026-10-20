@@ -4,7 +4,10 @@
 1. **電腦端（Windows）**：工作排程器 `MomTrack` 每 30 分鐘執行 `C:\Claude\MomTrack\run.bat`
    → `momtrack.py` 用 [GoogleFindMyTools](https://github.com/leonboe1/GoogleFindMyTools) 向 Google Find Hub 查 MiTag 位置、解密
    → GET 送到 Apps Script（`action=log&source=mitag`）。
-   同一次執行也用 locationsharinglib＋`cookies.txt` 讀 Google 地圖「位置資訊分享」中媽媽手機的位置（`source=phone`）。
+   同一次執行也查媽媽手機（`source=phone`），`phone.method` 二選一：
+   - `findhub`（現用）：第二份工具 `GoogleFindMyTools-mom` 以媽媽帳號登入，定位她的手機；憑證長期有效。
+   - `cookies`（備用）：locationsharinglib＋`cookies.txt` 讀「位置資訊分享」；從常用 Chrome 匯出約一天內失效（InvalidCookies），需用無痕視窗匯出。
+   每個 Find Hub 來源在獨立子程序執行（`--findhub-worker`），兩個帳號的 secrets.json 互不干擾。
    兩來源各自獨立執行、各自在 `state.json` 依時間戳去重；一個失敗不影響另一個。
 2. **儲存**：Google 試算表 `mom-tracker`（Drive: 我的雲端硬碟/Claude/mom-tracker），分頁 `log`：time(回報時間), lat, lon, accuracy_m, battery, received_at, source（mitag/phone；舊資料空白＝mitag）。
 3. **Apps Script（Code.gs）**：網頁應用程式，`?token=` 驗證；actions：`log` / `read&date=YYYY-MM-DD` / `latest` / `days`。
@@ -14,7 +17,7 @@
 ## 檔案位置
 | 位置 | 內容 |
 |---|---|
-| `C:\Claude\MomTrack\` | phone_setup.bat、cookies.txt（Google 帳號 cookies，勿外流）、setup.bat、run.bat、schedule.bat、venv（Python 3.14）、GoogleFindMyTools（含 `Auth\secrets.json` 登入憑證，勿外流） |
+| `C:\Claude\MomTrack\` | mom_setup.bat、GoogleFindMyTools-mom（媽媽帳號的 secrets.json，勿外流）、phone_setup.bat、cookies.txt（Google 帳號 cookies，勿外流）、setup.bat、run.bat、schedule.bat、venv（Python 3.14）、GoogleFindMyTools（含 `Auth\secrets.json` 登入憑證，勿外流） |
 | `G:\我的雲端硬碟\Claude\mom-tracker\` | momtrack.py、config.json（api / token / device_name / tools_dir）、Code.gs、index.html、momtrack.log、state.json |
 
 ## 踩過的坑
@@ -23,6 +26,7 @@
 - Claude 雲端工作階段無法直接寫入 `C:\Claude`、`G:\` → 檔案由使用者手動複製。
 - Claude 無法建立新 repo / 開 Pages → 使用者先建空 repo、手動開 Pages，Claude 負責推送。
 - 設定框灰字是 placeholder，網址要實際貼上。
+- Find Hub 只列「登入該帳號」的裝置；媽媽分享給你的位置不在你的 Find Hub 裡，所以手機要用媽媽帳號另跑一份。
 - locationsharinglib 寫死 `authuser=2`；momtrack.py 用子類別改成可設定，空白時自動試 0～3。
 
 ## 限制
