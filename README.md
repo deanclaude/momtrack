@@ -21,6 +21,9 @@
 | `G:\我的雲端硬碟\Claude\mom-tracker\` | momtrack.py、config.json（api / token / device_name / tools_dir）、Code.gs、index.html、momtrack.log、state.json |
 
 ## 踩過的坑
+- 排程與工具裝在 desktop-cupvhiq（`C:\Users\user`）；另一台電腦只有 G 槽同步，不能執行。
+- 從 Claude 寫入 G 槽的檔案曾被雲端硬碟同步蓋回舊版 → 由使用者在 desktop-cupvhiq 手動覆蓋。
+- 批次檔內含中文（UTF-8）時 cmd 會切錯指令 → 批次檔盡量全英文。
 - 電腦的 Python 3.12 壞掉 → setup.bat 依序試 `py -3.12/3.13/3.14`，實際用 3.14。
 - 第一次登入要跑兩次 Chrome 登入（帳號 token + 端對端加密金鑰，需輸入手機螢幕鎖 PIN）。
 - Claude 雲端工作階段無法直接寫入 `C:\Claude`、`G:\` → 檔案由使用者手動複製。
@@ -28,6 +31,11 @@
 - 設定框灰字是 placeholder，網址要實際貼上。
 - Find Hub 只列「登入該帳號」的裝置；媽媽分享給你的位置不在你的 Find Hub 裡，所以手機要用媽媽帳號另跑一份。
 - locationsharinglib 寫死 `authuser=2`；momtrack.py 用子類別改成可設定，空白時自動試 0～3。
+
+## 2026-10-29 Google 推播格式變更（已修）
+- 症狀：MiTag 與手機同時「等待 Find Hub 回應逾時」。偵錯：`python momtrack.py --debug-findhub <tools_dir> <裝置名>` → G 槽 `debug_findhub.log`。
+- 原因：推播 `crypto-key` 變成 `dh=...;p256ecdsa=...`（約 189 字元），原程式只砍 `dh=` 前綴就 base64 解碼 → `Incorrect padding`，且一則失敗就關閉整個 FCM 接收器。
+- 修法（momtrack.py `patch_fcm_ipv4_fallback()` 以 monkeypatch 套用，不改工具資料夾）：依參數名取 dh / salt、base64 自動補位、單則解密失敗只略過、mtalk 連線 IPv4/IPv6 happy eyeballs。
 
 ## 限制
 - MiTag 只有附近 Android 手機經過時才回報，航跡稀疏；電腦需開機不睡眠。
