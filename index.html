@@ -32,6 +32,17 @@
   #settings input { width:100%; }
   .row { display:flex; gap:6px; align-items:center; }
   .err { color:#dc2626; }
+  #alerts:empty { display:none; }
+  #alerts { padding:8px 12px; display:flex; flex-direction:column; gap:6px; background:var(--card); border-bottom:1px solid var(--line); }
+  .alert { border-radius:8px; padding:8px 10px; font-size:14px; line-height:1.45; display:flex; gap:8px; align-items:flex-start; }
+  .alert.bad { background:#fee2e2; color:#7f1d1d; }
+  .alert.warn { background:#fef3c7; color:#78350f; }
+  @media (prefers-color-scheme: dark) {
+    .alert.bad { background:#450a0a; color:#fecaca; }
+    .alert.warn { background:#451a03; color:#fde68a; }
+  }
+  .alert b { display:block; }
+  .alert .x { margin-left:auto; background:none; border:0; color:inherit; font-size:18px; padding:0 4px; cursor:pointer; }
   .src { display:inline-flex; align-items:center; gap:4px; font-size:14px; cursor:pointer; user-select:none; }
   .src input { width:16px; height:16px; margin:0; padding:0; }
   .dot { width:12px; height:12px; border-radius:50%; display:inline-block; }
@@ -54,6 +65,7 @@
     <button id="cfg" aria-label="設定">⚙︎</button>
   </div>
 </header>
+<div id="alerts"></div>
 <div id="bar">載入中…</div>
 <div id="map"></div>
 
@@ -166,13 +178,82 @@ function draw(fit) {
   $('bar').innerHTML = parts.join('') + latestBarHtml(lastLatest);
 }
 
+// ---------- 自動偵錯提醒 ----------
+const RUN_STALE_MIN = 75;      // 超過這麼久沒有任何回報 → 排程沒在跑
+const PHONE_STALE_H = 6;       // 手機超過這麼久沒新位置 → 提醒
+const MITAG_STALE_H = 24;      // MiTag 超過這麼久沒新位置 → 提醒
+const dismissed = new Set();
+
+function hintFor(msg) {
+  if (/逾時|Timeout/i.test(msg)) return '可能是 Google 推播格式又變了。在 desktop-cupvhiq 跑一次 --debug-findhub，把 debug_findhub.log 交給 Claude 看。';
+  if (/找不到名稱|device_name/.test(msg)) return '裝置名稱對不上（可能重新配對或改名）。檢查 config.json 的 device_name。';
+  if (/secrets|identity key|owner key|登入|auth|401|403/i.test(msg)) return '登入憑證可能失效，重跑 setup.bat（MiTag）或 mom_setup.bat（手機）的登入步驟。';
+  if (/ModuleNotFound/.test(msg)) return 'Python 套件缺失，確認排程用的是 C:\\Claude\\MomTrack\\venv 的 Python。';
+  if (/InvalidCookies/.test(msg)) return 'cookies 失效；手機已改用 findhub 方式時，確認 config.json 的 phone.method 是 "findhub"。';
+  return '把 momtrack.log 最後幾行交給 Claude 看。';
+}
+
+function buildAlerts(statusRes, latest) {
+  const out = [];
+  if (!statusRes) return out;
+  const now = statusRes.now || Date.now();
+  const st = statusRes.status || {};
+  const names = Object.keys(st);
+  if (!names.length) {
+    out.push({ id: 'none', lv: 'warn', t: '還沒有收到任何執行狀態', d: '新版 momtrack.py 執行過一次後就會出現。若一直如此，確認電腦端已換成新版。' });
+    return out;
+  }
+  const lastRun = Math.max(...names.map(k => st[k].t || 0));
+  if (now - lastRun > RUN_STALE_MIN * 60e3) {
+    out.push({ id: 'stale', lv: 'bad', t: `排程停了：最後一次執行是 ${ago(lastRun)}`,
+      d: 'desktop-cupvhiq 可能關機、睡眠或沒網路，或工作排程器 MomTrack 停了。' });
+  }
+  Object.keys(SRC).forEach(k => {
+    const s = st[k];
+    if (s && s.ok === false) {
+      const since = s.firstFail ? `（從 ${fmtFull(s.firstFail)} 起連續 ${s.fails} 次）` : '';
+      out.push({ id: 'fail-' + k + '-' + (s.firstFail || ''), lv: s.fails >= 2 ? 'bad' : 'warn',
+        t: `${SRC[k].label} 抓取失敗${since}`, d: `${s.msg}<br>👉 ${hintFor(s.msg)}` });
+    }
+  });
+  const by = (latest && latest.bySource) || {};
+  [['phone', PHONE_STALE_H, '手機可能關機、沒網路，或定位被關閉。'],
+   ['mitag', MITAG_STALE_H, 'MiTag 可能沒電，或附近沒有 Android 手機經過。']].forEach(([k, h, why]) => {
+    const p = by[k];
+    if (st[k] && st[k].ok && p && now - p.t > h * 3600e3) {
+      out.push({ id: 'old-' + k + '-' + p.t, lv: 'warn', t: `${SRC[k].label} 很久沒有新位置：最後一筆是 ${ago(p.t)}`, d: `程式正常，但沒有新資料。${why}` });
+    }
+  });
+  return out;
+}
+
+function renderAlerts(list) {
+  const box = $('alerts');
+  box.innerHTML = '';
+  list.filter(a => !dismissed.has(a.id)).forEach(a => {
+    const el = document.createElement('div');
+    el.className = 'alert ' + a.lv;
+    el.innerHTML = `<span>${a.lv === 'bad' ? '⚠️' : '💡'}</span><span><b>${a.t}</b>${a.d}</span>`;
+    const x = document.createElement('button');
+    x.className = 'x'; x.textContent = '×'; x.setAttribute('aria-label', '關閉提醒');
+    x.onclick = () => { dismissed.add(a.id); el.remove(); };
+    el.appendChild(x);
+    box.appendChild(el);
+  });
+}
+
 async function loadDay(date) {
   if (!cfg.api || !cfg.tok) { openSettings(); $('bar').textContent = '請先完成連線設定'; return; }
   $('bar').textContent = '載入中…';
   try {
-    const [day, latest] = await Promise.all([api({ action: 'read', date }), api({ action: 'latest' }).catch(() => null)]);
+    const [day, latest, status] = await Promise.all([
+      api({ action: 'read', date }),
+      api({ action: 'latest' }).catch(() => null),
+      api({ action: 'status' }).catch(() => null)
+    ]);
     lastDay = day; lastLatest = latest;
     draw(true);
+    renderAlerts(buildAlerts(status, latest));
   } catch (e) {
     layer.clearLayers();
     $('bar').innerHTML = `<span class="err">錯誤：${e.message}</span>`;
