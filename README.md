@@ -1,7 +1,7 @@
 # 媽媽追蹤器（MiTag ＋ 手機位置分享）— 交接摘要
 
 ## 架構
-1. **電腦端（Windows）**：工作排程器 `MomTrack` 每 30 分鐘執行 `C:\Claude\MomTrack\run.bat`
+1. **電腦端（Windows）**：工作排程器 `MomTrack` 每 10 分鐘執行 `C:\Claude\MomTrack\run.bat`
    → `momtrack.py` 用 [GoogleFindMyTools](https://github.com/leonboe1/GoogleFindMyTools) 向 Google Find Hub 查 MiTag 位置、解密
    → GET 送到 Apps Script（`action=log&source=mitag`）。
    同一次執行也查媽媽手機（`source=phone`），`phone.method` 二選一：
@@ -10,8 +10,8 @@
    每個 Find Hub 來源在獨立子程序執行（`--findhub-worker`），兩個帳號的 secrets.json 互不干擾。
    兩來源各自獨立執行、各自在 `state.json` 依時間戳去重；一個失敗不影響另一個。
 2. **儲存**：Google 試算表 `mom-tracker`（Drive: 我的雲端硬碟/Claude/mom-tracker），分頁 `log`：time(回報時間), lat, lon, accuracy_m, battery, received_at, source（mitag/phone；舊資料空白＝mitag）。
-3. **Apps Script（Code.gs）**：網頁應用程式，`?token=` 驗證；actions：`log` / `read&date=YYYY-MM-DD` / `latest` / `days`。
-4. **航跡頁**：同一天畫兩條線（MiTag 橘色虛線、手機藍色實線），可勾選切換；兩線分開＝手機沒帶在身上。
+3. **Apps Script（Code.gs）**：網頁應用程式，`?token=` 驗證；actions：`log` / `read&date=YYYY-MM-DD` / `range&from=ms&to=ms`（最多 62 天）/ `latest` / `days` / `status`。
+4. **航跡頁**：起迄日期＋時間下拉選單（或快速選項：今天／24 小時／3 天／7 天）；細線＋「›」箭頭標示方向（MiTag 橘、手機藍），可勾選切換；兩線分開＝手機沒帶在身上。
    ：本 repo `index.html` → https://deanclaude.github.io/momtrack/ （Leaflet + OSM；設定存 localStorage）。
 
 ## 檔案位置

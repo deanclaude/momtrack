@@ -46,16 +46,18 @@
   .src { display:inline-flex; align-items:center; gap:4px; font-size:14px; cursor:pointer; user-select:none; }
   .src input { width:16px; height:16px; margin:0; padding:0; }
   .dot { width:12px; height:12px; border-radius:50%; display:inline-block; }
+  .range { display:flex; flex-wrap:wrap; gap:6px; align-items:center; width:100%; }
+  .range .lbl { font-size:13px; color:var(--muted); }
+  .range select { padding:6px 4px; }
+  .range .seg { display:inline-flex; gap:4px; align-items:center; white-space:nowrap; }
+  .arrow-ic { background:none; border:0; }
+  .arrow-ic span { display:block; width:14px; height:14px; line-height:14px; text-align:center;
+    font-size:15px; font-weight:700; transform-origin:50% 50%; text-shadow:0 0 2px #fff, 0 0 2px #fff; }
 </style>
 </head>
 <body>
 <header>
   <h1>👩 媽媽追蹤器</h1>
-  <div class="row">
-    <button id="prev" aria-label="前一天">◀</button>
-    <input type="date" id="date">
-    <button id="next" aria-label="後一天">▶</button>
-  </div>
   <div class="row">
     <label class="src"><input type="checkbox" id="show-mitag" checked><span class="dot" style="background:#ea580c"></span>MiTag</label>
     <label class="src"><input type="checkbox" id="show-phone" checked><span class="dot" style="background:#2563eb"></span>手機</label>
@@ -63,6 +65,19 @@
   <div class="row">
     <button id="now" class="primary">最新位置</button>
     <button id="cfg" aria-label="設定">⚙︎</button>
+  </div>
+  <div class="range">
+    <select id="preset" aria-label="快速選擇">
+      <option value="today">今天</option>
+      <option value="24h">最近 24 小時</option>
+      <option value="3d">最近 3 天</option>
+      <option value="7d">最近 7 天</option>
+      <option value="custom">自訂</option>
+    </select>
+    <span class="seg"><span class="lbl">起</span>
+      <select id="fromDay" aria-label="起始日期"></select><select id="fromHour" aria-label="起始時間"></select></span>
+    <span class="seg"><span class="lbl">迄</span>
+      <select id="toDay" aria-label="結束日期"></select><select id="toHour" aria-label="結束時間"></select></span>
   </div>
 </header>
 <div id="alerts"></div>
@@ -118,6 +133,11 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19, attribution: '© OpenStreetMap'
 }).addTo(map);
 const layer = L.layerGroup().addTo(map);
+const arrowLayer = L.layerGroup().addTo(map);
+const tzOff = 8 * 3600e3;                                   // Asia/Taipei，無日光節約
+const dayStart = d => Date.parse(d + 'T00:00:00+08:00');
+const dayOf = t => new Date(t + tzOff).toISOString().slice(0, 10);
+const hourOf = t => new Date(t + tzOff).getUTCHours();
 
 async function api(params) {
   const q = new URLSearchParams({ ...params, token: cfg.tok });
@@ -143,12 +163,48 @@ function latestBarHtml(latest) {
   }).join('');
 }
 
+// 沿線每隔約 45px 畫一個「›」指出行進方向；縮放後重算
+let tracks = [];
+function drawArrows() {
+  arrowLayer.clearLayers();
+  const GAP = 45;
+  tracks.forEach(({ ll, color }) => {
+    const px = ll.map(p => map.latLngToLayerPoint(p));
+    let carry = GAP / 2;
+    for (let i = 1; i < px.length; i++) {
+      const a = px[i - 1], b = px[i];
+      const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy);
+      if (len < 1) continue;
+      const ang = Math.atan2(dy, dx) * 180 / Math.PI;
+      let d = carry;
+      if (len < 18) { carry = Math.max(0, carry - len); continue; }   // 太短的段不畫，避免糊在一起
+      while (d < len) {
+        const pt = L.point(a.x + dx * d / len, a.y + dy * d / len);
+        L.marker(map.layerPointToLatLng(pt), {
+          interactive: false, keyboard: false,
+          icon: L.divIcon({ className: 'arrow-ic', iconSize: [14, 14], iconAnchor: [7, 7],
+            html: `<span style="color:${color};transform:rotate(${ang}deg)">›</span>` })
+        }).addTo(arrowLayer);
+        d += GAP;
+      }
+      carry = d - len;
+    }
+  });
+}
+map.on('zoomend', drawArrows);
+
+function rangeLabel() {
+  const f = cur.from, t = cur.to;
+  return `${fmtFull(f)} → ${fmtFull(t)}`;
+}
+
 function draw(fit) {
   layer.clearLayers();
-  if (!lastDay) return;
+  tracks = [];
+  if (!lastDay) { drawArrows(); return; }
   const all = lastDay.points;
   const bounds = [];
-  const parts = [`<span>${lastDay.date}</span>`];
+  const parts = [`<span>${rangeLabel()}</span>`];
   Object.keys(SRC).forEach(k => {
     const raw = all.filter(p => (p.src || 'mitag') === k);
     const pts = raw.filter(p => !(cfg.maxacc > 0 && +p.acc > cfg.maxacc));
@@ -159,27 +215,29 @@ function draw(fit) {
     if (!shown(k) || !pts.length) return;
     const c = SRC[k].color;
     const ll = pts.map(p => [p.lat, p.lon]);
-    L.polyline(ll, { color: c, weight: 4, opacity: .8, dashArray: k === 'mitag' ? '8 6' : null }).addTo(layer);
+    L.polyline(ll, { color: c, weight: 2, opacity: .85 }).addTo(layer);
+    tracks.push({ ll, color: c });
     pts.forEach((p, i) => {
       const isFirst = i === 0, isLast = i === pts.length - 1;
       const m = L.circleMarker([p.lat, p.lon], {
-        radius: isLast ? 9 : isFirst ? 7 : 4, color: c, fillColor: isFirst ? '#fff' : c,
-        fillOpacity: isLast ? .95 : .7, weight: isLast ? 3 : 2
+        radius: isLast ? 7 : isFirst ? 6 : 2.5, color: c, fillColor: isFirst ? '#fff' : c,
+        fillOpacity: isLast ? .95 : .8, weight: isLast ? 2.5 : isFirst ? 2 : 1
       }).addTo(layer);
       const acc = p.acc !== '' && p.acc != null ? `<br>誤差 ±${Math.round(p.acc)} m` : '';
       const batt = p.batt !== '' && p.batt != null ? `<br>電量 ${p.batt}%` : '';
-      m.bindPopup(`<b>${SRC[k].label} ${fmtTime(p.t)}</b>${isFirst ? '（起點）' : isLast ? '（終點）' : ''}${acc}${batt}`);
+      m.bindPopup(`<b>${SRC[k].label} ${fmtFull(p.t)}</b>${isFirst ? '（起點）' : isLast ? '（終點）' : ''}${acc}${batt}`);
       bounds.push([p.lat, p.lon]);
     });
     const last = pts[pts.length - 1];
     if (last.acc) L.circle([last.lat, last.lon], { radius: +last.acc, color: c, weight: 1, fillOpacity: .08 }).addTo(layer);
   });
   if (fit && bounds.length) map.fitBounds(L.latLngBounds(bounds).pad(0.2), { maxZoom: 17 });
+  drawArrows();
   $('bar').innerHTML = parts.join('') + latestBarHtml(lastLatest);
 }
 
 // ---------- 自動偵錯提醒 ----------
-const RUN_STALE_MIN = 75;      // 超過這麼久沒有任何回報 → 排程沒在跑
+const RUN_STALE_MIN = 30;      // 超過這麼久沒有任何回報 → 排程沒在跑
 const PHONE_STALE_H = 6;       // 手機超過這麼久沒新位置 → 提醒
 const MITAG_STALE_H = 24;      // MiTag 超過這麼久沒新位置 → 提醒
 const dismissed = new Set();
@@ -242,23 +300,91 @@ function renderAlerts(list) {
   });
 }
 
-async function loadDay(date) {
+let cur = { from: 0, to: 0 };
+let knownDays = [];
+
+async function fetchRange(from, to) {
+  try {
+    return (await api({ action: 'range', from, to })).points;
+  } catch (e) {
+    if (!/unknown action/.test(e.message)) throw e;
+    // 舊版 Code.gs 沒有 range：逐日讀再篩選（最多 31 天）
+    const pts = [];
+    for (let d = dayOf(from), n = 0; d <= dayOf(to) && n < 31; d = shiftDay(d, 1), n++) {
+      (await api({ action: 'read', date: d })).points.forEach(p => { if (p.t >= from && p.t <= to) pts.push(p); });
+    }
+    return pts.sort((x, y) => x.t - y.t);
+  }
+}
+
+async function load(fit = true) {
   if (!cfg.api || !cfg.tok) { openSettings(); $('bar').textContent = '請先完成連線設定'; return; }
+  if (cur.from > cur.to) { $('bar').innerHTML = '<span class="err">起始時間晚於結束時間</span>'; return; }
   $('bar').textContent = '載入中…';
   try {
-    const [day, latest, status] = await Promise.all([
-      api({ action: 'read', date }),
+    const [points, latest, status] = await Promise.all([
+      fetchRange(cur.from, cur.to),
       api({ action: 'latest' }).catch(() => null),
       api({ action: 'status' }).catch(() => null)
     ]);
-    lastDay = day; lastLatest = latest;
-    draw(true);
+    lastDay = { points }; lastLatest = latest;
+    draw(fit);
     renderAlerts(buildAlerts(status, latest));
   } catch (e) {
-    layer.clearLayers();
+    layer.clearLayers(); arrowLayer.clearLayers();
     $('bar').innerHTML = `<span class="err">錯誤：${e.message}</span>`;
   }
 }
+
+// ---------- 起迄下拉選單 ----------
+function fillDays() {
+  const today = todayStr();
+  const set = new Set(knownDays);
+  for (let i = 0; i < 7; i++) set.add(shiftDay(today, -i));      // 最近 7 天一定可選
+  if (cur.from) set.add(dayOf(cur.from));
+  if (cur.to) set.add(dayOf(cur.to));
+  const days = [...set].filter(d => d <= today).sort().reverse();
+  const wk = '日一二三四五六';
+  const opts = days.map(d => {
+    const w = wk[new Date(d + 'T00:00:00Z').getUTCDay()];
+    const mark = knownDays.includes(d) ? '' : '（無資料）';
+    return `<option value="${d}">${d.slice(5).replace('-', '/')}（${w}）${mark}</option>`;
+  }).join('');
+  $('fromDay').innerHTML = opts; $('toDay').innerHTML = opts;
+}
+function fillHours() {
+  const h = n => String(n).padStart(2, '0');
+  $('fromHour').innerHTML = [...Array(24)].map((_, i) => `<option value="${i}">${h(i)}:00</option>`).join('');
+  $('toHour').innerHTML = [...Array(24)].map((_, i) => `<option value="${i}">${h(i)}:59</option>`).join('');
+}
+function syncSelects() {
+  fillDays();
+  $('fromDay').value = dayOf(cur.from); $('fromHour').value = hourOf(cur.from);
+  $('toDay').value = dayOf(cur.to);     $('toHour').value = hourOf(cur.to);
+}
+function applyPreset(p) {
+  const now = Date.now();
+  const endOfHour = Math.floor((now + tzOff) / 3600e3) * 3600e3 - tzOff + 3600e3 - 1;
+  if (p === 'today') cur = { from: dayStart(todayStr()), to: dayStart(todayStr()) + 86400e3 - 1 };
+  else if (p === '24h') cur = { from: endOfHour + 1 - 24 * 3600e3, to: endOfHour };
+  else if (p === '3d') cur = { from: dayStart(shiftDay(todayStr(), -2)), to: dayStart(todayStr()) + 86400e3 - 1 };
+  else if (p === '7d') cur = { from: dayStart(shiftDay(todayStr(), -6)), to: dayStart(todayStr()) + 86400e3 - 1 };
+  syncSelects();
+}
+function readSelects() {
+  cur = {
+    from: dayStart($('fromDay').value) + (+$('fromHour').value) * 3600e3,
+    to: dayStart($('toDay').value) + (+$('toHour').value) * 3600e3 + 3600e3 - 1
+  };
+}
+['fromDay', 'fromHour', 'toDay', 'toHour'].forEach(id => $(id).onchange = () => {
+  $('preset').value = 'custom'; store.set('preset', 'custom');
+  readSelects(); load();
+});
+$('preset').onchange = () => {
+  const p = $('preset').value; store.set('preset', p);
+  if (p !== 'custom') { applyPreset(p); load(); }
+};
 
 async function showLatest() {
   try {
@@ -266,9 +392,11 @@ async function showLatest() {
     const pick = ['phone', 'mitag'].filter(shown).map(k => latest.bySource && latest.bySource[k]).filter(Boolean)
       .sort((a, b) => b.t - a.t)[0] || latest.point;
     if (!pick) return;
-    const d = new Intl.DateTimeFormat('sv-SE', { timeZone: TZ }).format(new Date(pick.t));
-    $('date').value = d;
-    await loadDay(d);
+    const d = dayOf(pick.t);
+    $('preset').value = d === todayStr() ? 'today' : 'custom';
+    cur = { from: dayStart(d), to: dayStart(d) + 86400e3 - 1 };
+    syncSelects();
+    await load(false);
     map.setView([pick.lat, pick.lon], 16);
   } catch (e) {
     $('bar').innerHTML = `<span class="err">錯誤：${e.message}</span>`;
@@ -293,11 +421,8 @@ $('save').onclick = () => {
   cfg = { api, tok, maxacc: +$('maxacc').value || 0 };
   store.set('api', cfg.api); store.set('tok', cfg.tok); store.set('maxacc', String(cfg.maxacc));
   $('settings').style.display = 'none';
-  loadDay($('date').value);
+  init();
 };
-$('date').onchange = () => loadDay($('date').value);
-$('prev').onclick = () => { $('date').value = shiftDay($('date').value, -1); loadDay($('date').value); };
-$('next').onclick = () => { $('date').value = shiftDay($('date').value, 1); loadDay($('date').value); };
 $('now').onclick = showLatest;
 ['mitag', 'phone'].forEach(k => {
   const el = $('show-' + k);
@@ -305,12 +430,25 @@ $('now').onclick = showLatest;
   el.onchange = () => { store.set('show.' + k, el.checked ? '1' : '0'); draw(false); };
 });
 
-$('date').value = todayStr();
-$('date').max = todayStr();
-loadDay($('date').value);
+fillHours();
+async function init() {
+  const p = store.get('preset', 'today');
+  $('preset').value = p === 'custom' ? 'today' : p;      // 自訂區間不跨次保留，重開回到預設
+  applyPreset($('preset').value);
+  load();
+  if (cfg.api && cfg.tok) {
+    try { knownDays = (await api({ action: 'days' })).days || []; syncSelects(); } catch (e) {}
+  }
+}
+init();
 
-// 看今天時，每 5 分鐘自動更新
-setInterval(() => { if ($('date').value === todayStr() && $('settings').style.display !== 'flex') loadDay($('date').value); }, 5 * 60 * 1000);
+// 區間包含現在時，每 5 分鐘自動更新（快速選項會跟著往後滑）
+setInterval(() => {
+  if ($('settings').style.display === 'flex' || cur.to < Date.now() - 3600e3) return;
+  const p = $('preset').value;
+  if (p !== 'custom') applyPreset(p);
+  load(false);
+}, 5 * 60 * 1000);
 </script>
 </body>
 </html>
